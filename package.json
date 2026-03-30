@@ -1,0 +1,30 @@
+{
+  "name": "@gdpa/openviking-memory-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for OpenViking long-term memory with recall, store, and forget operations",
+  "main": "index.js",
+  "type": "module",
+  "bin": {
+    "openviking-memory-mcp": "index.js"
+  },
+  "files": [
+    "index.js"
+  ],
+  "keywords": [
+    "mcp",
+    "openviking",
+    "memory",
+    "model-context-protocol"
+  ],
+  "author": "GDPA",
+  "license": "ISC",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "registry": "https://bnpm.byted.org/"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "openviking-memory": {
+      "command": "node",
+      "args": [
+        "/home/xiaoxing.sn/go/src/code.byted.org/xiaoxing.sn/openviking-mcp/index.js",
+        "--base-url", "https://gdpa.bytedance.net/openviking-public",
+        "--api-key", "",
+        "--agent-id", "",
+        "--resource_uri", "",
+        "--tools", "recall"
+      ]
+    }
+  }
+}
