@@ -13,7 +13,7 @@ npm install @gdpa/openviking-memory-mcp
 Run as an MCP server via stdio transport:
 
 ```bash
-npx @gdpa/openviking-memory-mcp --base-url <OPENVIKING_URL> --api-key <API_KEY> --agent-id <AGENT_ID> [--resource-uri <VIKING_RESOURCE_URI>] [--tools <ACTION_LIST>]
+npx @gdpa/openviking-memory-mcp --base-url <OPENVIKING_URL> --api-key <API_KEY> --agent-id <AGENT_ID>
 ```
 
 ### Cursor MCP Configuration
@@ -31,9 +31,7 @@ Add to your `mcp.json`:
         "@gdpa/openviking-memory-mcp",
         "--base-url", "https://gdpa.bytedance.net/openviking-public",
         "--api-key", "<YOUR_API_KEY>",
-        "--agent-id", "<YOUR_AGENT_ID>",
-        "--resource_uri", "viking://resources/your/project/subpath",
-        "--tools", "recall"
+        "--agent-id", "<YOUR_AGENT_ID>"
       ]
     }
   }
@@ -47,20 +45,17 @@ Add to your `mcp.json`:
 | `--base-url` | Yes | OpenViking API base URL |
 | `--api-key` | Yes | API key for authentication |
 | `--agent-id` | Yes | Agent identifier |
-| `--resource-uri`, `--resource_uri` | No | Default resource search scope. When set, recall only searches resources under this URI prefix while still searching memories normally. If a tool call explicitly passes a resource `targetUri`, it must stay inside this configured scope. |
-| `--tools` | No | Comma-separated action allowlist. Supported values: `recall`, `store`, `forget`. Default is all actions. Example: `--tools recall` or `--tools recall,store`. |
+
+## Optional Arguments
+
+These parameters are supported, but they are not part of the default example configuration:
+
+| Argument | Description |
+|----------|-------------|
+| `--resource-uri`, `--resource_uri` | Default resource search scope. When set, recall only searches resources under this URI prefix while still searching memories normally. If a tool call explicitly passes a resource `targetUri`, it must stay inside this configured scope. |
+| `--tools` | Comma-separated action allowlist. Supported values: `recall`, `store`, `forget`. Default is all actions. Example: `--tools recall` or `--tools recall,store`. |
 
 ## MCP Tool: `memory`
-
-This server exposes a single `memory` tool. The available actions are controlled by `--tools`.
-
-Example:
-
-```json
-"--tools", "recall"
-```
-
-With this configuration, the MCP tool only allows `action: "recall"`.
 
 ### `recall` — Semantic search over stored memories and resources
 
