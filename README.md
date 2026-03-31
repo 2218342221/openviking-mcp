@@ -1,6 +1,6 @@
 # @gdpa/openviking-memory-mcp
 
-MCP server for OpenViking long-term memory and resource retrieval with recall, store, and forget operations.
+MCP server for OpenViking long-term memory and filesystem operations with recall, store, forget, fs/ls, fs/read, and fs/grep actions.
 
 ## Installation
 
@@ -53,7 +53,7 @@ These parameters are supported, but they are not part of the default example con
 | Argument | Description |
 |----------|-------------|
 | `--resource-uri`, `--resource_uri` | Default resource search scope. When set, recall only searches resources under this URI prefix while still searching memories normally. If a tool call explicitly passes a resource `targetUri`, it must stay inside this configured scope. |
-| `--tools` | Comma-separated action allowlist. Supported values: `recall`, `store`, `forget`. Default is all actions. Example: `--tools recall` or `--tools recall,store`. |
+| `--tools` | Comma-separated action allowlist. Supported values: `recall`, `store`, `forget`, `fs/ls`, `fs/read`, `fs/grep`. Default is all actions. Example: `--tools recall` or `--tools recall,store,fs/read`. |
 
 ## MCP Tool: `memory`
 
@@ -63,6 +63,7 @@ These parameters are supported, but they are not part of the default example con
 - `limit` (number, optional): Max results (default 10)
 - `scoreThreshold` (number, optional): Minimum relevance score
 - `targetUri` (string, optional): Narrow search to a specific memory or resource URI. If `resource_uri` is configured, any resource `targetUri` must be within that prefix.
+- Result format: each recall line includes both `context_type` and `is_leaf` marker.
 
 ### `store` — Store new information as memory
 
@@ -75,6 +76,22 @@ These parameters are supported, but they are not part of the default example con
 - `uri` (string, optional): Specific URI to delete
 - `query` (string, optional): Query-based deletion
 - `scoreThreshold` (number, optional): Score threshold for query-based deletion
+
+### `fs/ls` — List directory contents
+
+- `uri` (string, required): Target Viking URI (used to locate readable `is_leaf=true` nodes)
+- `recursive` (boolean, optional): Recursively list descendants
+- `simple` (boolean, optional): Return simpler relative path output
+
+### `fs/read` — Read full content
+
+- `uri` (string, required): Target Viking URI for an `is_leaf=true` node only
+
+### `fs/grep` — Pattern search in content
+
+- `uri` (string, required): Target Viking URI scope
+- `pattern` (string, required): Regex search pattern
+- `caseInsensitive` (boolean, optional): Ignore case (alias: `case_insensitive`)
 
 ## Requirements
 

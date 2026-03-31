@@ -45,8 +45,6 @@ function parseArgs(argv) {
   return args;
 }
 
-const config = parseArgs(process.argv);
-
 // ---------------------------------------------------------------------------
 // OpenViking HTTP client
 // ---------------------------------------------------------------------------
@@ -66,7 +64,14 @@ const AGENT_STRUCTURE_DIRS = new Set([
   "workspaces",
 ]);
 
-const ALL_ACTIONS = ["recall", "store", "forget"];
+const ALL_ACTIONS = [
+  "recall",
+  "store",
+  "forget",
+  "fs/ls",
+  "fs/read",
+  "fs/grep",
+];
 
 function md5Short(input) {
   return createHash("md5").update(input).digest("hex").slice(0, 12);
@@ -187,10 +192,32 @@ class OpenVikingClient {
     }
   }
 
-  async ls(uri) {
+  async ls(uri, options = {}) {
+    const normalizedUri = await this.normalizeFsUri(uri);
+    const recursive = options.recursive === true ? "true" : "false";
+    const simple = options.simple === true ? "true" : "false";
     return this.request(
-      `/api/v1/fs/ls?uri=${encodeURIComponent(uri)}&output=original`
+      `/api/v1/fs/ls?uri=${encodeURIComponent(normalizedUri)}&recursive=${recursive}&simple=${simple}`
     );
+  }
+
+  async read(uri) {
+    const normalizedUri = await this.normalizeFsUri(uri);
+    return this.request(
+      `/api/v1/content/read?uri=${encodeURIComponent(normalizedUri)}`
+    );
+  }
+
+  async grep(uri, pattern, caseInsensitive = false) {
+    const normalizedUri = await this.normalizeFsUri(uri);
+    return this.request("/api/v1/search/grep", {
+      method: "POST",
+      body: JSON.stringify({
+        uri: normalizedUri,
+        pattern,
+        case_insensitive: caseInsensitive,
+      }),
+    });
   }
 
   async getRuntimeIdentity() {
@@ -278,6 +305,29 @@ class OpenVikingClient {
     const reservedDirs =
       scope === "user" ? USER_STRUCTURE_DIRS : AGENT_STRUCTURE_DIRS;
     if (!reservedDirs.has(parts[0])) return trimmed;
+
+    const space = await this.resolveScopeSpace(scope);
+    return `viking://${scope}/${space}/${parts.join("/")}`;
+  }
+
+  async normalizeFsUri(uri) {
+    const normalized = normalizeOptionalUri(uri);
+    if (!normalized) {
+      throw new Error("Missing required parameter: uri");
+    }
+    const match = normalized.match(/^viking:\/\/(user|agent)(?:\/(.*))?$/);
+    if (!match) return normalized;
+
+    const scope = match[1];
+    const rawRest = (match[2] ?? "").trim();
+    if (!rawRest) return normalized;
+
+    const parts = rawRest.split("/").filter(Boolean);
+    if (parts.length === 0) return normalized;
+
+    const reservedDirs =
+      scope === "user" ? USER_STRUCTURE_DIRS : AGENT_STRUCTURE_DIRS;
+    if (!reservedDirs.has(parts[0])) return normalized;
 
     const space = await this.resolveScopeSpace(scope);
     return `viking://${scope}/${space}/${parts.join("/")}`;
@@ -417,6 +467,13 @@ function isLeafMemory(item) {
   return false;
 }
 
+function getContextIsLeaf(item) {
+  if (typeof item.is_leaf === "boolean") return item.is_leaf;
+  if (typeof item.isLeaf === "boolean") return item.isLeaf;
+  if (typeof item.level === "number") return item.level === 2;
+  return null;
+}
+
 function getContextDedupeKey(item) {
   if (getContextType(item) === "memory") {
     return getMemoryDedupeKey(item);
@@ -461,12 +518,14 @@ function formatContextLines(items) {
     .map((item, index) => {
       const score = clampScore(item.score);
       const contextType = getContextType(item);
+      const isLeaf = getContextIsLeaf(item);
+      const isLeafLabel = isLeaf === null ? "is_leaf=unknown" : `is_leaf=${isLeaf}`;
       const summary =
         item.abstract?.trim() ||
         item.overview?.trim() ||
         item.match_reason?.trim() ||
         item.uri;
-      return `${index + 1}. [${contextType}] ${summary} (${(
+      return `${index + 1}. [${contextType}] [${isLeafLabel}] ${summary} (${(
         score * 100
       ).toFixed(0)}%)\n   ${item.uri}`;
     })
@@ -516,6 +575,8 @@ function formatSettledSearchError(scopeLabel, reason) {
         : String(reason);
   return `${scopeLabel}: ${message}`;
 }
+
+const config = parseArgs(process.argv);
 
 // ---------------------------------------------------------------------------
 // Tool action handlers
@@ -761,6 +822,95 @@ async function handleForget(client, params) {
   };
 }
 
+async function handleFsLs(client, params) {
+  const uri = typeof params.uri === "string" ? params.uri : undefined;
+  const recursive = typeof params.recursive === "boolean" ? params.recursive : false;
+  const simple = typeof params.simple === "boolean" ? params.simple : false;
+  const entries = await client.ls(uri, { recursive, simple });
+  const items = Array.isArray(entries) ? entries : [];
+  if (items.length === 0) {
+    return {
+      content: [{ type: "text", text: `No items found at ${uri}.` }],
+    };
+  }
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify({ uri, recursive, simple, count: items.length, items }, null, 2),
+      },
+    ],
+  };
+}
+
+async function handleFsRead(client, params) {
+  const uri = typeof params.uri === "string" ? params.uri : undefined;
+  const result = await client.read(uri);
+  if (result === undefined || result === null || result === "") {
+    return {
+      content: [{ type: "text", text: `No content found at ${uri}.` }],
+    };
+  }
+  return {
+    content: [
+      {
+        type: "text",
+        text:
+          typeof result === "string" ? result : JSON.stringify(result, null, 2),
+      },
+    ],
+  };
+}
+
+async function handleFsGrep(client, params) {
+  const uri = typeof params.uri === "string" ? params.uri : undefined;
+  const pattern =
+    typeof params.pattern === "string" ? params.pattern : undefined;
+  const caseInsensitive =
+    typeof params.caseInsensitive === "boolean"
+      ? params.caseInsensitive
+      : typeof params.case_insensitive === "boolean"
+        ? params.case_insensitive
+        : false;
+
+  const result = await client.grep(uri, pattern, caseInsensitive);
+  const matches = Array.isArray(result?.matches) ? result.matches : [];
+  const count =
+    typeof result?.count === "number" && Number.isFinite(result.count)
+      ? result.count
+      : matches.length;
+  if (matches.length === 0) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: `No matches found for pattern "${pattern}" under ${uri}.`,
+        },
+      ],
+    };
+  }
+
+  const lines = matches
+    .map((item, index) => {
+      const matchUri =
+        typeof item?.uri === "string" ? item.uri : "unknown://unknown";
+      const line = typeof item?.line === "number" ? item.line : "?";
+      const content =
+        typeof item?.content === "string" ? item.content : String(item?.content);
+      return `${index + 1}. ${matchUri}:${line}\n   ${content}`;
+    })
+    .join("\n");
+
+  return {
+    content: [
+      {
+        type: "text",
+        text: `Found ${count} matches for "${pattern}" in ${uri}:\n\n${lines}`,
+      },
+    ],
+  };
+}
+
 // ---------------------------------------------------------------------------
 // MCP server setup
 // ---------------------------------------------------------------------------
@@ -781,17 +931,20 @@ const enabledActions = config.enabledActions;
 
 server.tool(
   "memory",
-  `Manage long-term memory and retrieval powered by OpenViking. This tool supports three actions:
+  `Manage long-term memory and retrieval powered by OpenViking. This tool supports six actions:
 
 ## When to use this tool
 - Use "recall" to search past memories and indexed resources BEFORE answering questions about user preferences, history, past decisions, project docs, or anything the user may have told you before. Always search first when the user asks "do you remember", "what did I say about", or references past interactions or project documentation.
 - Use "store" to save important information the user shares — preferences, facts about themselves, key decisions, project context, or anything that should be remembered across conversations. Proactively store when the user shares personal details, makes decisions, or explicitly asks you to remember something.
 - Use "forget" to delete a specific memory when the user asks you to forget something, or to correct outdated/wrong information. You can delete by exact URI (from a prior recall result) or search by query.
+- Use "fs/ls" to inspect URI structure and identify readable 'is_leaf=true' nodes.
+- Use "fs/read" to read full content only from 'is_leaf=true' nodes (leaf/file nodes), not from directory nodes.
+- Use "fs/grep" to run regex-like content search within a URI scope.
 
 ## Actions
 
 ### recall
-Search memories and resources by semantic query. Returns ranked results with relevance scores.
+Search memories and resources by semantic query. Returns ranked results with relevance scores, context_type, and is_leaf markers.
 Required params: query
 Optional params: limit (default 10), scoreThreshold (default 0.01), targetUri
 
@@ -803,11 +956,27 @@ Optional params: role (default "user"), sessionId
 ### forget
 Delete a memory by exact URI, or search-then-delete. When searching, if a single strong match (>=85% score) is found it is deleted automatically; otherwise candidates are returned for you to pick from.
 Required params: uri OR query (at least one)
-Optional params: targetUri, limit (default 5), scoreThreshold (default 0.01)`,
+Optional params: targetUri, limit (default 5), scoreThreshold (default 0.01)
+
+### fs/ls
+List directory entries under a URI to locate 'is_leaf=true' readable nodes.
+Required params: uri
+Optional params: recursive (default false), simple (default false)
+
+### fs/read
+Read full content (L2) only from 'is_leaf=true' nodes (leaf/file nodes).
+Required params: uri
+
+### fs/grep
+Pattern search under a URI.
+Required params: uri, pattern
+Optional params: caseInsensitive (default false)`,
   {
     action: z
-      .enum(["recall", "store", "forget"])
-      .describe("Operation to perform: recall (search memories and resources), store (save new memory), or forget (delete memory)"),
+      .enum(["recall", "store", "forget", "fs/ls", "fs/read", "fs/grep"])
+      .describe(
+        "Operation to perform: recall, store, forget, fs/ls, fs/read, or fs/grep."
+      ),
 
     query: z
       .string()
@@ -842,7 +1011,27 @@ Optional params: targetUri, limit (default 5), scoreThreshold (default 0.01)`,
     uri: z
       .string()
       .optional()
-      .describe("Exact memory URI to delete — for forget action. Use a URI returned from a prior recall result (e.g. 'viking://user/.../memories/...')."),
+      .describe("Viking URI. Required for fs/ls, fs/read, fs/grep. For fs/read, pass a URI corresponding to an is_leaf=true node. For forget, this is the exact memory URI to delete."),
+    recursive: z
+      .boolean()
+      .optional()
+      .describe("Whether fs/ls lists descendants recursively."),
+    simple: z
+      .boolean()
+      .optional()
+      .describe("Whether fs/ls returns simplified relative path output."),
+    pattern: z
+      .string()
+      .optional()
+      .describe("Regex pattern for fs/grep action."),
+    caseInsensitive: z
+      .boolean()
+      .optional()
+      .describe("Whether fs/grep ignores case (maps to case_insensitive)."),
+    case_insensitive: z
+      .boolean()
+      .optional()
+      .describe("Alias of caseInsensitive for fs/grep compatibility."),
   },
   async (params) => {
     try {
@@ -882,6 +1071,41 @@ Optional params: targetUri, limit (default 5), scoreThreshold (default 0.01)`,
         }
         case "forget": {
           return await handleForget(client, params);
+        }
+        case "fs/ls": {
+          if (!params.uri) {
+            return {
+              content: [{ type: "text", text: "Missing required parameter: uri" }],
+              isError: true,
+            };
+          }
+          return await handleFsLs(client, params);
+        }
+        case "fs/read": {
+          if (!params.uri) {
+            return {
+              content: [{ type: "text", text: "Missing required parameter: uri" }],
+              isError: true,
+            };
+          }
+          return await handleFsRead(client, params);
+        }
+        case "fs/grep": {
+          if (!params.uri) {
+            return {
+              content: [{ type: "text", text: "Missing required parameter: uri" }],
+              isError: true,
+            };
+          }
+          if (!params.pattern) {
+            return {
+              content: [
+                { type: "text", text: "Missing required parameter: pattern" },
+              ],
+              isError: true,
+            };
+          }
+          return await handleFsGrep(client, params);
         }
         default:
           return {
