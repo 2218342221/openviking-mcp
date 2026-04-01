@@ -8,7 +8,8 @@
     "openviking-memory-mcp": "index.js"
   },
   "files": [
-    "index.js"
+    "index.js",
+    "session-client.js"
   ],
   "keywords": [
     "mcp",

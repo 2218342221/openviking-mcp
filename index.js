@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { OpenVikingSessionClient } from "./session-client.js";
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing
@@ -151,6 +152,12 @@ function isUriWithinScope(uri, scope) {
   );
 }
 
+function getErrorMessage(err) {
+  if (err instanceof Error && err.message) return err.message;
+  if (typeof err === "string") return err;
+  return String(err);
+}
+
 function getScopeEntryName(entry, scope) {
   if (!entry || typeof entry !== "object") return "";
   if (typeof entry.name === "string" && entry.name.trim()) {
@@ -173,6 +180,9 @@ class OpenVikingClient {
     this.resourceUri = normalizeUriPrefix(resourceUri);
     this.resolvedSpaceByScope = {};
     this.runtimeIdentity = null;
+    this.sessions = new OpenVikingSessionClient((path, init) =>
+      this.request(path, init)
+    );
   }
 
   async request(path, init = {}) {
@@ -380,45 +390,6 @@ class OpenVikingClient {
 
   getDefaultResourceTargetUri() {
     return this.resourceUri || "viking://resources";
-  }
-
-  async createSession() {
-    const result = await this.request("/api/v1/sessions", {
-      method: "POST",
-      body: JSON.stringify({}),
-    });
-    return result.session_id;
-  }
-
-  async addSessionMessage(sessionId, role, content) {
-    await this.request(
-      `/api/v1/sessions/${encodeURIComponent(sessionId)}/messages`,
-      {
-        method: "POST",
-        body: JSON.stringify({ role, content }),
-      }
-    );
-  }
-
-  async getSession(sessionId) {
-    return this.request(
-      `/api/v1/sessions/${encodeURIComponent(sessionId)}`,
-      { method: "GET" }
-    );
-  }
-
-  async extractSessionMemories(sessionId) {
-    return this.request(
-      `/api/v1/sessions/${encodeURIComponent(sessionId)}/extract`,
-      { method: "POST", body: JSON.stringify({}) }
-    );
-  }
-
-  async deleteSession(sessionId) {
-    await this.request(
-      `/api/v1/sessions/${encodeURIComponent(sessionId)}`,
-      { method: "DELETE" }
-    );
   }
 
   async deleteUri(uri) {
@@ -634,6 +605,33 @@ async function buildShorthandMemoriesHint(client, targetUri) {
   }
 }
 
+async function buildShorthandMemoriesFsHint(client, uri, err) {
+  const scope = getShorthandMemoriesScope(uri);
+  if (!scope) return "";
+
+  const message = getErrorMessage(err).toLowerCase();
+  if (!message.includes("not_found") && !message.includes("not found")) {
+    return "";
+  }
+
+  try {
+    const fullUri = await client.getScopedMemoriesUri(scope);
+    return (
+      ` Hint: this shorthand URI may not map to your data space in this environment. ` +
+      `Try uri=${fullUri}.`
+    );
+  } catch {
+    const fallbackFullUri =
+      scope === "user"
+        ? "viking://user/<space>/memories"
+        : "viking://agent/<space>/memories";
+    return (
+      ` Hint: this shorthand URI may not map to your data space in this environment. ` +
+      `Try uri=${fallbackFullUri}.`
+    );
+  }
+}
+
 const config = parseArgs(process.argv);
 
 // ---------------------------------------------------------------------------
@@ -778,32 +776,135 @@ async function handleRecall(client, params) {
 }
 
 async function handleStore(client, params) {
-  const text = params.text;
+  const text = typeof params.text === "string" ? params.text : undefined;
+  const hasText = typeof text === "string" && text.length > 0;
   const role = typeof params.role === "string" ? params.role : "user";
   const sessionIdIn =
-    typeof params.sessionId === "string" ? params.sessionId : undefined;
+    typeof params.session_id === "string"
+      ? params.session_id
+      : typeof params.sessionId === "string"
+        ? params.sessionId
+        : undefined;
+  const hasCreateSessionParam =
+    typeof params.create_session === "boolean" ||
+    typeof params.createSession === "boolean";
+  const createSession =
+    typeof params.create_session === "boolean"
+      ? params.create_session
+      : typeof params.createSession === "boolean"
+        ? params.createSession
+        : undefined;
+  const commitSession =
+    typeof params.commit_session === "boolean"
+      ? params.commit_session
+      : typeof params.commitSession === "boolean"
+        ? params.commitSession
+        : false;
 
   let sessionId = sessionIdIn;
   let createdTempSession = false;
+  let messageStored = false;
   try {
+    if (!hasText && !commitSession) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Missing required parameter: text. For commit-only, set commit_session=true and provide a session selector (session_id or create_session=true).",
+          },
+        ],
+        isError: true,
+      };
+    }
     if (!sessionId) {
-      sessionId = await client.createSession();
+      if (!hasCreateSessionParam) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Missing session selector: provide session_id, or explicitly pass create_session=true to create a new session.",
+            },
+          ],
+          isError: true,
+        };
+      }
+      if (createSession !== true) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "session_id=none and create_session is not true. When session_id is absent, set create_session=true to create a new session.",
+            },
+          ],
+          isError: true,
+        };
+      }
+      sessionId = await client.sessions.createSession();
       createdTempSession = true;
     }
-    await client.addSessionMessage(sessionId, role, text);
-    await client.getSession(sessionId).catch(() => ({}));
-    const extracted = await client.extractSessionMemories(sessionId);
+    if (hasText) {
+      await client.sessions.addSessionMessage(sessionId, role, text);
+      messageStored = true;
+    }
+
+    if (!commitSession) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Stored message in session ${sessionId}. You can continue appending by passing session_id=${sessionId}. IMPORTANT: memories are not extracted yet. You must call store with commit_session=true as the final step. After commit_session=true, this session_id is considered closed; do not push new messages to it.`,
+          },
+        ],
+      };
+    }
+
+    let commitResult;
+    try {
+      commitResult = await client.sessions.commitSession(sessionId);
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Commit failed for session ${sessionId}: ${getErrorMessage(err)}. Retry with action=store, session_id=${sessionId}, commit_session=true, and no text to avoid duplicate messages.`,
+          },
+        ],
+        isError: true,
+      };
+    }
+    const taskId =
+      typeof commitResult?.task_id === "string" ? commitResult.task_id : "";
+    const commitStatus =
+      typeof commitResult?.status === "string" ? commitResult.status : "accepted";
+    if (taskId) {
+      client.sessions.scheduleCleanupAfterCommit(
+        sessionId,
+        taskId,
+        "store commit_session"
+      );
+    }
     return {
       content: [
         {
           type: "text",
-          text: `Stored in session ${sessionId} and extracted ${extracted.length} memories.`,
+          text: `${hasText ? `Stored message in session ${sessionId}. ` : `Commit requested for existing session ${sessionId} without adding new messages. `}Commit requested (status=${commitStatus}${taskId ? `, task_id=${taskId}` : ""}). This session_id is now closed for new messages. If you need to store more text, create/use another session_id. Background worker will delete this session after commit task completion.`,
         },
       ],
     };
+  } catch (err) {
+    const sidPart = sessionId ? `session_id=${sessionId}` : "session_id=none";
+    return {
+      content: [
+        {
+          type: "text",
+          text: `${sidPart}. Store failed: ${getErrorMessage(err)}.`,
+        },
+      ],
+      isError: true,
+    };
   } finally {
-    if (createdTempSession && sessionId) {
-      await client.deleteSession(sessionId).catch(() => {});
+    if (createdTempSession && sessionId && !messageStored) {
+      await client.sessions.deleteSession(sessionId).catch(() => {});
     }
   }
 }
@@ -954,21 +1055,34 @@ async function handleFsLs(client, params) {
   const uri = typeof params.uri === "string" ? params.uri : undefined;
   const recursive = typeof params.recursive === "boolean" ? params.recursive : false;
   const simple = typeof params.simple === "boolean" ? params.simple : false;
-  const entries = await client.ls(uri, { recursive, simple });
-  const items = Array.isArray(entries) ? entries : [];
-  if (items.length === 0) {
+  try {
+    const entries = await client.ls(uri, { recursive, simple });
+    const items = Array.isArray(entries) ? entries : [];
+    if (items.length === 0) {
+      return {
+        content: [{ type: "text", text: `No items found at ${uri}.` }],
+      };
+    }
     return {
-      content: [{ type: "text", text: `No items found at ${uri}.` }],
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({ uri, recursive, simple, count: items.length, items }, null, 2),
+        },
+      ],
+    };
+  } catch (err) {
+    const hint = await buildShorthandMemoriesFsHint(client, uri, err);
+    return {
+      content: [
+        {
+          type: "text",
+          text: `fs/ls failed for ${uri}: ${getErrorMessage(err)}.${hint}`,
+        },
+      ],
+      isError: true,
     };
   }
-  return {
-    content: [
-      {
-        type: "text",
-        text: JSON.stringify({ uri, recursive, simple, count: items.length, items }, null, 2),
-      },
-    ],
-  };
 }
 
 async function handleFsRead(client, params) {
@@ -1077,9 +1191,12 @@ Required params: query
 Optional params: limit (default 10), scoreThreshold (default 0.01), targetUri
 
 ### store
-Store text into the memory pipeline. The text is written to a session and memories are asynchronously extracted by the OpenViking server in the background. This means a successful store response does NOT mean the memories are immediately available — calling recall right after store may not find the newly stored content. It typically takes a few seconds for extraction to complete.
-Required params: text
-Optional params: role (default "user"), sessionId
+Store text into a session. By default this only appends a message and returns the session_id so you can continue writing to the same session in later calls. Set commit_session=true when you want to commit the session. Commit returns quickly with a task_id, and the server completes extraction in the background.
+Important lifecycle rule: if you do not commit, memories are not extracted; you must eventually call commit_session=true as the final step. After commit_session=true, this session_id is considered closed for new messages.
+If a commit request fails, retry commit-only with the same session_id and commit_session=true, without text, to avoid duplicate writes.
+Required params: text OR commit_session=true
+Session selector (required): each store call must provide session_id, OR explicitly pass create_session=true when session_id is absent. Both session_id and create_session can be used with commit_session.
+Other params: role (default "user"), commit_session (default false), aliases sessionId/createSession/commitSession
 
 ### forget
 Delete a memory by exact URI, or search-then-delete. When searching, if a single strong match (>=85% score) is found it is deleted automatically; otherwise candidates are returned for you to pick from.
@@ -1126,15 +1243,35 @@ Optional params: caseInsensitive (default false)`,
     text: z
       .string()
       .optional()
-      .describe("The information to store as memory — required for store action. Write clear, factual text that captures what should be remembered."),
+      .describe("The information to store as memory. Required unless using commit-only mode (commit_session=true, without text)."),
     role: z
       .string()
       .optional()
       .describe("Message role for the stored session entry (default: 'user'). Typically 'user' or 'assistant'."),
+    session_id: z
+      .string()
+      .optional()
+      .describe("Existing session ID for appending messages. Preferred over sessionId. Do not reuse a session_id after a successful commit_session=true call."),
     sessionId: z
       .string()
       .optional()
-      .describe("An existing OpenViking session ID to append to, instead of creating a temporary session."),
+      .describe("Alias of session_id for backward compatibility."),
+    create_session: z
+      .boolean()
+      .optional()
+      .describe("Session selector. Required when session_id is absent. Must be explicitly set to true to create a new session."),
+    createSession: z
+      .boolean()
+      .optional()
+      .describe("Alias of create_session for backward compatibility. Same rule: required when session_id is absent."),
+    commit_session: z
+      .boolean()
+      .optional()
+      .describe("Whether to commit the session after this call (default: false). Supports commit-only mode when used without text. Commit should be called as the final step; after commit_session=true the session is considered closed for new messages."),
+    commitSession: z
+      .boolean()
+      .optional()
+      .describe("Alias of commit_session for backward compatibility."),
 
     uri: z
       .string()
@@ -1187,10 +1324,54 @@ Optional params: caseInsensitive (default false)`,
           return await handleRecall(client, params);
         }
         case "store": {
-          if (!params.text) {
+          const hasText =
+            typeof params.text === "string" && params.text.length > 0;
+          const wantsCommitOnly =
+            params.commit_session === true || params.commitSession === true;
+          const sessionId =
+            typeof params.session_id === "string"
+              ? params.session_id
+              : typeof params.sessionId === "string"
+                ? params.sessionId
+                : "";
+          const hasCreateSessionParam =
+            typeof params.create_session === "boolean" ||
+            typeof params.createSession === "boolean";
+          const createSession =
+            typeof params.create_session === "boolean"
+              ? params.create_session
+              : typeof params.createSession === "boolean"
+                ? params.createSession
+                : undefined;
+          if (!hasText && !wantsCommitOnly) {
             return {
               content: [
-                { type: "text", text: "Missing required parameter: text" },
+                {
+                  type: "text",
+                  text: "Missing required parameter: text (or set commit_session=true for commit-only).",
+                },
+              ],
+              isError: true,
+            };
+          }
+          if (!sessionId && !hasCreateSessionParam) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: "Missing session selector: provide session_id, or explicitly pass create_session=true.",
+                },
+              ],
+              isError: true,
+            };
+          }
+          if (!sessionId && createSession !== true) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: "session_id is absent and create_session is not true. Pass create_session=true to create a session.",
+                },
               ],
               isError: true,
             };

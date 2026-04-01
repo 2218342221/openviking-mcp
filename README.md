@@ -67,9 +67,16 @@ These parameters are supported, but they are not part of the default example con
 
 ### `store` — Store new information as memory
 
-- `text` (string, required): Content to store
+- `text` (string, optional): Content to append into the session. Required for append mode.
 - `role` (string, optional): Message role
-- `sessionId` (string, optional): Session identifier
+- `session_id` (string, conditionally required): Session identifier for appending to an existing session (alias: `sessionId`)
+- `create_session` (boolean, conditionally required): When `session_id` is absent, this must be passed explicitly and set to `true` to create a new session (alias: `createSession`)
+- `commit_session` (boolean, optional): Commit the session after adding this message (default: `false`). Commit runs extraction asynchronously and returns a `task_id` (alias: `commitSession`)
+- Session selector rule (required): each `store` call must explicitly identify the session source by either `session_id` or `create_session=true` (when no `session_id`).
+- Commit-only mode: set `commit_session=true` and do not pass `text`. It works with either an existing `session_id`, or `create_session=true` if you intentionally want to create-then-commit in one call.
+- Lifecycle rule: if `commit_session=false`, data is only appended and memory extraction has not started yet. You must eventually call one final `store` with `commit_session=true`.
+- After `commit_session=true`, this `session_id` is considered closed; do not push more messages to it. Start a new session for subsequent writes.
+- If commit fails and you need to retry, retry commit-only (`session_id` + `commit_session=true`, no `text`) to avoid duplicate writes.
 
 ### `forget` — Delete stored memories
 
