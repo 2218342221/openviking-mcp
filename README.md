@@ -75,6 +75,7 @@ These parameters are supported, but they are not part of the default example con
 
 - `uri` (string, optional): Specific URI to delete
 - `query` (string, optional): Query-based deletion
+- `targetUri` (string, optional): Optional search scope URI. When omitted, query-based deletion searches both user and agent memories.
 - `scoreThreshold` (number, optional): Score threshold for query-based deletion
 
 ### `fs/ls` — List directory contents

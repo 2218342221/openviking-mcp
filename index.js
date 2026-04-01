@@ -49,7 +49,7 @@ function parseArgs(argv) {
 // OpenViking HTTP client
 // ---------------------------------------------------------------------------
 
-const TIMEOUT_MS = 15_000;
+const TIMEOUT_MS = 60_000;
 
 const MEMORY_URI_PATTERNS = [
   /^viking:\/\/user\/(?:[^/]+\/)?memories(?:\/|$)/,
@@ -149,6 +149,20 @@ function isUriWithinScope(uri, scope) {
     normalizedUri === normalizedScope ||
     normalizedUri.startsWith(`${normalizedScope}/`)
   );
+}
+
+function getScopeEntryName(entry, scope) {
+  if (!entry || typeof entry !== "object") return "";
+  if (typeof entry.name === "string" && entry.name.trim()) {
+    return entry.name.trim();
+  }
+  if (typeof entry.uri === "string") {
+    const match = entry.uri
+      .trim()
+      .match(new RegExp(`^viking://${scope}/([^/]+)/*$`));
+    if (match && match[1]) return match[1].trim();
+  }
+  return "";
 }
 
 class OpenVikingClient {
@@ -260,9 +274,7 @@ class OpenVikingClient {
       const entries = await this.ls(`viking://${scope}`);
       const spaces = entries
         .filter((entry) => entry?.isDir === true)
-        .map((entry) =>
-          typeof entry.name === "string" ? entry.name.trim() : ""
-        )
+        .map((entry) => getScopeEntryName(entry, scope))
         .filter(
           (name) => name && !name.startsWith(".") && !reservedDirs.has(name)
         );
@@ -289,6 +301,11 @@ class OpenVikingClient {
     return fallbackSpace;
   }
 
+  async getScopedMemoriesUri(scope) {
+    const space = await this.resolveScopeSpace(scope);
+    return `viking://${scope}/${space}/memories`;
+  }
+
   async normalizeTargetUri(targetUri) {
     if (typeof targetUri !== "string" || !targetUri.trim()) return undefined;
     const trimmed = normalizeUriPrefix(targetUri);
@@ -306,8 +323,9 @@ class OpenVikingClient {
       scope === "user" ? USER_STRUCTURE_DIRS : AGENT_STRUCTURE_DIRS;
     if (!reservedDirs.has(parts[0])) return trimmed;
 
-    const space = await this.resolveScopeSpace(scope);
-    return `viking://${scope}/${space}/${parts.join("/")}`;
+    // Keep shorthand scope URIs (for example viking://user/memories)
+    // untouched and let backend resolve the actual runtime space.
+    return trimmed;
   }
 
   async normalizeFsUri(uri) {
@@ -329,8 +347,9 @@ class OpenVikingClient {
       scope === "user" ? USER_STRUCTURE_DIRS : AGENT_STRUCTURE_DIRS;
     if (!reservedDirs.has(parts[0])) return normalized;
 
-    const space = await this.resolveScopeSpace(scope);
-    return `viking://${scope}/${space}/${parts.join("/")}`;
+    // Keep shorthand scope URIs (for example viking://user/memories)
+    // untouched and let backend resolve the actual runtime space.
+    return normalized;
   }
 
   async find(query, options) {
@@ -576,6 +595,45 @@ function formatSettledSearchError(scopeLabel, reason) {
   return `${scopeLabel}: ${message}`;
 }
 
+function isShorthandMemoriesTargetUri(value) {
+  if (typeof value !== "string") return false;
+  const normalized = normalizeUriPrefix(value);
+  return (
+    normalized === "viking://user/memories" ||
+    normalized === "viking://agent/memories"
+  );
+}
+
+function getShorthandMemoriesScope(targetUri) {
+  if (typeof targetUri !== "string") return undefined;
+  const normalized = normalizeUriPrefix(targetUri);
+  if (normalized === "viking://user/memories") return "user";
+  if (normalized === "viking://agent/memories") return "agent";
+  return undefined;
+}
+
+async function buildShorthandMemoriesHint(client, targetUri) {
+  const scope = getShorthandMemoriesScope(targetUri);
+  if (!scope) return "";
+
+  try {
+    const fullUri = await client.getScopedMemoriesUri(scope);
+    return (
+      ` Hint: this shorthand URI may not map to your data space in this environment. ` +
+      `Try targetUri=${fullUri}, or omit targetUri.`
+    );
+  } catch {
+    const fallbackFullUri =
+      scope === "user"
+        ? "viking://user/<space>/memories"
+        : "viking://agent/<space>/memories";
+    return (
+      ` Hint: this shorthand URI may not map to your data space in this environment. ` +
+      `Try targetUri=${fallbackFullUri}, or omit targetUri.`
+    );
+  }
+}
+
 const config = parseArgs(process.argv);
 
 // ---------------------------------------------------------------------------
@@ -584,7 +642,6 @@ const config = parseArgs(process.argv);
 
 const DEFAULT_RECALL_LIMIT = 10;
 const DEFAULT_SCORE_THRESHOLD = 0.01;
-const DEFAULT_TARGET_URI = "viking://user/memories";
 
 async function handleRecall(client, params) {
   const query = params.query;
@@ -608,11 +665,19 @@ async function handleRecall(client, params) {
       scoreThreshold: 0,
     });
   } else {
+    const [userMemoriesUri, agentMemoriesUri] = await Promise.all([
+      client
+        .getScopedMemoriesUri("user")
+        .catch(() => "viking://user/memories"),
+      client
+        .getScopedMemoriesUri("agent")
+        .catch(() => "viking://agent/memories"),
+    ]);
     const recallScopes = [
       {
         label: "user memories",
         promise: client.find(query, {
-          targetUri: "viking://user/memories",
+          targetUri: userMemoriesUri,
           limit: requestLimit,
           scoreThreshold: 0,
         }),
@@ -620,7 +685,7 @@ async function handleRecall(client, params) {
       {
         label: "agent memories",
         promise: client.find(query, {
-          targetUri: "viking://agent/memories",
+          targetUri: agentMemoriesUri,
           limit: requestLimit,
           scoreThreshold: 0,
         }),
@@ -683,8 +748,11 @@ async function handleRecall(client, params) {
         `Recall produced no usable results and some scopes failed. ${partialFailures.join(" | ")}`
       );
     }
+    const hint = await buildShorthandMemoriesHint(client, targetUri);
     return {
-      content: [{ type: "text", text: "No relevant results found." }],
+      content: [
+        { type: "text", text: `No relevant results found.${hint}` },
+      ],
     };
   }
   const counts = summarizeContextCounts(contexts);
@@ -772,35 +840,95 @@ async function handleForget(client, params) {
       ? Math.max(0, Math.min(1, params.scoreThreshold))
       : DEFAULT_SCORE_THRESHOLD;
   const targetUri =
-    typeof params.targetUri === "string"
-      ? params.targetUri
-      : DEFAULT_TARGET_URI;
+    typeof params.targetUri === "string" ? params.targetUri : undefined;
   const requestLimit = Math.max(limit * 4, 20);
 
-  const result = await client.find(query, {
-    targetUri,
-    limit: requestLimit,
-    scoreThreshold: 0,
-  });
-  const candidates = postProcessMemories(result.memories ?? [], {
+  let searchResult;
+  let partialFailures = [];
+  if (targetUri) {
+    searchResult = await client.find(query, {
+      targetUri,
+      limit: requestLimit,
+      scoreThreshold: 0,
+    });
+  } else {
+    const [userMemoriesUri, agentMemoriesUri] = await Promise.all([
+      client
+        .getScopedMemoriesUri("user")
+        .catch(() => "viking://user/memories"),
+      client
+        .getScopedMemoriesUri("agent")
+        .catch(() => "viking://agent/memories"),
+    ]);
+    const forgetScopes = [
+      {
+        label: "user memories",
+        promise: client.find(query, {
+          targetUri: userMemoriesUri,
+          limit: requestLimit,
+          scoreThreshold: 0,
+        }),
+      },
+      {
+        label: "agent memories",
+        promise: client.find(query, {
+          targetUri: agentMemoriesUri,
+          limit: requestLimit,
+          scoreThreshold: 0,
+        }),
+      },
+    ];
+    const settled = await Promise.allSettled(
+      forgetScopes.map((scope) => scope.promise)
+    );
+    const successes = [];
+    const failures = [];
+    for (const [index, entry] of settled.entries()) {
+      if (entry.status === "fulfilled") {
+        successes.push(entry.value);
+      } else {
+        failures.push(
+          formatSettledSearchError(forgetScopes[index].label, entry.reason)
+        );
+      }
+    }
+    if (successes.length === 0) {
+      throw new Error(
+        `Forget search failed for all scopes. ${failures.join(" | ")}`
+      );
+    }
+    searchResult = mergeFindResults(successes);
+    partialFailures = failures;
+  }
+
+  const candidates = postProcessMemories(searchResult.memories ?? [], {
     limit: requestLimit,
     scoreThreshold,
     leafOnly: true,
   }).filter((item) => isMemoryUri(item.uri));
 
+  const partialFailureNote =
+    partialFailures.length > 0
+      ? ` Failed scopes: ${partialFailures.join(" | ")}`
+      : "";
   if (candidates.length === 0) {
+    const hint = await buildShorthandMemoriesHint(client, targetUri);
     return {
       content: [
         {
           type: "text",
-          text: "No matching leaf memory candidates found. Try a more specific query.",
+          text: `No matching leaf memory candidates found. Try a more specific query.${partialFailureNote}${hint}`,
         },
       ],
     };
   }
 
   const top = candidates[0];
-  if (candidates.length === 1 && clampScore(top.score) >= 0.85) {
+  if (
+    candidates.length === 1 &&
+    clampScore(top.score) >= 0.85 &&
+    partialFailures.length === 0
+  ) {
     await client.deleteUri(top.uri);
     return { content: [{ type: "text", text: `Forgotten: ${top.uri}` }] };
   }
@@ -816,7 +944,7 @@ async function handleForget(client, params) {
     content: [
       {
         type: "text",
-        text: `Found ${candidates.length} candidates. Specify uri:\n${list}`,
+        text: `Found ${candidates.length} candidates. Specify uri:\n${list}${partialFailureNote ? `\n\n${partialFailureNote}` : ""}`,
       },
     ],
   };
@@ -956,7 +1084,7 @@ Optional params: role (default "user"), sessionId
 ### forget
 Delete a memory by exact URI, or search-then-delete. When searching, if a single strong match (>=85% score) is found it is deleted automatically; otherwise candidates are returned for you to pick from.
 Required params: uri OR query (at least one)
-Optional params: targetUri, limit (default 5), scoreThreshold (default 0.01)
+Optional params: targetUri, limit (default 5), scoreThreshold (default 0.01). When targetUri is omitted, query search runs across both user and agent memories.
 
 ### fs/ls
 List directory entries under a URI to locate 'is_leaf=true' readable nodes.
